@@ -87,20 +87,19 @@ struct BarView: View {
     }
 
     private var pill: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 6) {
             Text(formattedTime)
-                .font(.system(size: 13, design: .monospaced))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 5))
+                .font(.system(size: 11, design: .monospaced))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(.secondary.opacity(0.18), in: RoundedRectangle(cornerRadius: 4))
             if let label = store.state?.label, !label.isEmpty {
-                Text(label).font(.system(size: 14))
+                Text(label).font(.system(size: 13))
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
         .background(.ultraThinMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(.secondary.opacity(0.15), lineWidth: 0.5))
     }
 
     private var formattedTime: String {
@@ -121,6 +120,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var store: TimerStore!
     private var cancellable: AnyCancellable?
 
+    // Tracks the previous tick so we can detect natural countdown expiration
+    // (countdown active → not visible AND the prior end_time has passed) vs a
+    // user-initiated stop (state vanished while end_time was still in the future).
+    private var lastCountdownEndTime: Date?
+    private var lastWasVisibleCountdown = false
+
     func applicationDidFinishLaunching(_ note: Notification) {
         let stateURL = URL(
             fileURLWithPath: NSString(string: "~/.timer-overlay/state.json")
@@ -136,14 +141,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupPanel()
         store.start()
 
-        // Tie visibility to displaySeconds (not just state presence) so a finished
-        // countdown hides even if state.json still exists.
         cancellable = Publishers.CombineLatest(store.$state, store.$now)
-            .compactMap { [weak self] _, _ in self?.store.displaySeconds != nil }
-            .removeDuplicates()
-            .sink { [weak self] visible in
-                Task { @MainActor in self?.updateVisibility(visible: visible) }
+            .sink { [weak self] _, _ in
+                Task { @MainActor in self?.onTick() }
             }
+    }
+
+    private func onTick() {
+        let visible = store.displaySeconds != nil
+        let state = store.state
+        let now = store.now
+
+        // Detect natural countdown expiration: previous tick had a visible
+        // countdown, current tick is hidden, and that countdown's end_time
+        // is now in the past. Only fire if it's a genuine expiry, not a user stop.
+        if lastWasVisibleCountdown && !visible,
+           let prevEnd = lastCountdownEndTime,
+           prevEnd <= now
+        {
+            NSSound(named: "Glass")?.play()
+        }
+
+        lastCountdownEndTime = state?.end_time
+        lastWasVisibleCountdown = visible && state?.end_time != nil
+
+        if panel.isVisible != visible {
+            updateVisibility(visible: visible)
+        }
     }
 
     private func setupStatusItem() {
