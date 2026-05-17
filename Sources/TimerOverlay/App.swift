@@ -3,11 +3,11 @@ import AppKit
 import Combine
 
 // State file written by Raycast extensions.
-// Bar reads this once a second to detect new/stopped timers.
+// Countdown: end_time set. Stopwatch: end_time nil → counts up from started_at.
 struct TimerState: Codable, Equatable {
     let label: String?
     let started_at: Date
-    let end_time: Date
+    let end_time: Date?
 }
 
 @MainActor
@@ -44,17 +44,34 @@ final class TimerStore: ObservableObject {
         if parsed != state { state = parsed }
     }
 
-    var remainingSeconds: Int? {
+    // Seconds to display, or nil if the bar should hide.
+    // Countdown: time remaining; hides at 0.
+    // Stopwatch: time elapsed since started_at; never auto-hides.
+    var displaySeconds: Int? {
         guard let s = state else { return nil }
-        let r = Int(s.end_time.timeIntervalSince(now).rounded(.up))
-        return r > 0 ? r : nil
+        if let end = s.end_time {
+            let r = Int(end.timeIntervalSince(now).rounded(.up))
+            return r > 0 ? r : nil
+        }
+        return max(0, Int(now.timeIntervalSince(s.started_at)))
     }
 }
 
 struct BarView: View {
     @ObservedObject var store: TimerStore
+    let width: CGFloat
+    let height: CGFloat
 
     var body: some View {
+        HStack {
+            Spacer(minLength: 0)
+            pill
+            Spacer(minLength: 0)
+        }
+        .frame(width: width, height: height)
+    }
+
+    private var pill: some View {
         HStack(spacing: 10) {
             Text(formattedTime)
                 .font(.system(size: 13, design: .monospaced))
@@ -69,11 +86,10 @@ struct BarView: View {
         .padding(.vertical, 9)
         .background(.ultraThinMaterial, in: Capsule())
         .overlay(Capsule().strokeBorder(.secondary.opacity(0.15), lineWidth: 0.5))
-        .fixedSize()
     }
 
     private var formattedTime: String {
-        let s = store.remainingSeconds ?? 0
+        let s = store.displaySeconds ?? 0
         let h = s / 3600
         let m = (s % 3600) / 60
         let sec = s % 60
@@ -105,11 +121,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupPanel()
         store.start()
 
-        cancellable = store.$state
-            .map { $0 != nil }
+        // Tie visibility to displaySeconds (not just state presence) so a finished
+        // countdown hides even if state.json still exists.
+        cancellable = Publishers.CombineLatest(store.$state, store.$now)
+            .compactMap { [weak self] _, _ in self?.store.displaySeconds != nil }
             .removeDuplicates()
-            .sink { [weak self] hasState in
-                Task { @MainActor in self?.updateVisibility(hasState: hasState) }
+            .sink { [weak self] visible in
+                Task { @MainActor in self?.updateVisibility(visible: visible) }
             }
     }
 
@@ -129,12 +147,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
     }
 
+    // Fixed panel size; SwiftUI content centers itself via outer Spacers.
+    // Width is generous to fit long labels; height accommodates pill + breathing room.
+    private static let panelWidth: CGFloat = 320
+    private static let panelHeight: CGFloat = 44
+
     private func setupPanel() {
-        let host = NSHostingController(rootView: BarView(store: store))
-        host.sizingOptions = .preferredContentSize
+        let host = NSHostingController(
+            rootView: BarView(store: store, width: Self.panelWidth, height: Self.panelHeight)
+        )
 
         panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 240, height: 44),
+            contentRect: NSRect(x: 0, y: 0, width: Self.panelWidth, height: Self.panelHeight),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -147,31 +171,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .fullScreenAuxiliary,
             .ignoresCycle
         ]
-        panel.isMovableByWindowBackground = true
+        // Pure display overlay — let clicks pass through everywhere, including the pill.
+        panel.ignoresMouseEvents = true
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        panel.hasShadow = false  // shadow on a borderless transparent panel paints the full rect; skip it
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
 
-        if let screen = NSScreen.main {
-            let frame = screen.visibleFrame
-            let panelSize = panel.frame.size
-            let x = frame.midX - panelSize.width / 2
-            let y = frame.maxY - panelSize.height - 50
-            panel.setFrameOrigin(NSPoint(x: x, y: y))
-        }
+        positionAtBottomCenter()
     }
 
-    private func updateVisibility(hasState: Bool) {
-        if hasState {
+    // Bottom-center placement, matching Raycast Focus bar position.
+    // visibleFrame.minY already excludes the dock.
+    private func positionAtBottomCenter() {
+        guard let screen = NSScreen.main else { return }
+        let frame = screen.visibleFrame
+        let x = frame.midX - Self.panelWidth / 2
+        let y = frame.minY + 16
+        panel.setFrameOrigin(NSPoint(x: x, y: y))
+    }
+
+    private func updateVisibility(visible: Bool) {
+        if visible {
+            positionAtBottomCenter()
             panel.orderFrontRegardless()
         } else {
             panel.orderOut(nil)
         }
     }
 
-    @objc private func showBar() { panel.orderFrontRegardless() }
+    @objc private func showBar() {
+        positionAtBottomCenter()
+        panel.orderFrontRegardless()
+    }
     @objc private func hideBar() { panel.orderOut(nil) }
 }
 
