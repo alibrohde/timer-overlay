@@ -18,8 +18,23 @@ final class TimerStore: ObservableObject {
     private let stateURL: URL
     private var pollTimer: Timer?
     private let decoder: JSONDecoder = {
+        let withFrac = ISO8601DateFormatter()
+        withFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let noFrac = ISO8601DateFormatter()
+        noFrac.formatOptions = [.withInternetDateTime]
         let d = JSONDecoder()
-        d.dateDecodingStrategy = .iso8601
+        // JS Date.toISOString() emits ".NNNZ" (fractional seconds); Swift's built-in
+        // .iso8601 rejects that. Try both fractional and plain ISO8601 forms.
+        d.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let str = try container.decode(String.self)
+            if let date = withFrac.date(from: str) { return date }
+            if let date = noFrac.date(from: str) { return date }
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Invalid ISO8601 date: \(str)"
+            )
+        }
         return d
     }()
 
