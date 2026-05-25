@@ -87,19 +87,20 @@ struct BarView: View {
     }
 
     private var pill: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 12) {
             Text(formattedTime)
-                .font(.system(size: 11, design: .monospaced))
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(.secondary.opacity(0.18), in: RoundedRectangle(cornerRadius: 4))
+                .font(.system(size: 30, weight: .semibold, design: .monospaced))
+                .monospacedDigit()
             if let label = store.state?.label, !label.isEmpty {
-                Text(label).font(.system(size: 13))
+                Text(label)
+                    .font(.system(size: 26, weight: .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-        .background(.ultraThinMaterial, in: Capsule())
+        .foregroundStyle(.white)
+        .shadow(color: .black.opacity(0.8), radius: 4, x: 0, y: 1)
+        .shadow(color: .black.opacity(0.35), radius: 12, x: 0, y: 2)
     }
 
     private var formattedTime: String {
@@ -188,8 +189,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Fixed panel size; SwiftUI content centers itself via outer Spacers.
     // Width is generous to fit long labels; height accommodates pill + breathing room.
-    private static let panelWidth: CGFloat = 320
-    private static let panelHeight: CGFloat = 44
+    private static let panelWidth: CGFloat = 520
+    private static let panelHeight: CGFloat = 78
 
     private func setupPanel() {
         let host = NSHostingController(
