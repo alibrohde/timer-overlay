@@ -76,6 +76,7 @@ struct BarView: View {
     @ObservedObject var store: TimerStore
     let width: CGFloat
     let height: CGFloat
+    private let accent = Color(red: 1.0, green: 0.16, blue: 0.52)
 
     var body: some View {
         HStack {
@@ -98,9 +99,9 @@ struct BarView: View {
                     .minimumScaleFactor(0.72)
             }
         }
-        .foregroundStyle(.white)
-        .shadow(color: .black.opacity(0.8), radius: 4, x: 0, y: 1)
-        .shadow(color: .black.opacity(0.35), radius: 12, x: 0, y: 2)
+        .foregroundStyle(accent)
+        .shadow(color: .black.opacity(0.72), radius: 3, x: 0, y: 1)
+        .shadow(color: .black.opacity(0.28), radius: 10, x: 0, y: 2)
     }
 
     private var formattedTime: String {
