@@ -100,8 +100,6 @@ struct BarView: View {
             }
         }
         .foregroundStyle(accent)
-        .shadow(color: .black.opacity(0.72), radius: 3, x: 0, y: 1)
-        .shadow(color: .black.opacity(0.28), radius: 10, x: 0, y: 2)
     }
 
     private var formattedTime: String {
