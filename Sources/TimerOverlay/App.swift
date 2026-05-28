@@ -111,10 +111,6 @@ struct BarView: View {
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
         .background(.black.opacity(0.86), in: Capsule())
-        .overlay(
-            Capsule()
-                .stroke(accent.opacity(0.4), lineWidth: 1)
-        )
     }
 
     private var formattedTime: String {
