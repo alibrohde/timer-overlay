@@ -8,6 +8,10 @@ struct TimerState: Codable, Equatable {
     let label: String?
     let started_at: Date
     let end_time: Date?
+    let minutes: Int?
+    let active_state_file: String?
+    let log_file_path: String?
+    let alert_volume: Double?
 }
 
 @MainActor
@@ -18,16 +22,16 @@ final class TimerStore: ObservableObject {
     private let stateURL: URL
     private var pollTimer: Timer?
     private let decoder: JSONDecoder = {
-        let withFrac = ISO8601DateFormatter()
-        withFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let noFrac = ISO8601DateFormatter()
-        noFrac.formatOptions = [.withInternetDateTime]
         let d = JSONDecoder()
         // JS Date.toISOString() emits ".NNNZ" (fractional seconds); Swift's built-in
         // .iso8601 rejects that. Try both fractional and plain ISO8601 forms.
         d.dateDecodingStrategy = .custom { decoder in
             let container = try decoder.singleValueContainer()
             let str = try container.decode(String.self)
+            let withFrac = ISO8601DateFormatter()
+            withFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let noFrac = ISO8601DateFormatter()
+            noFrac.formatOptions = [.withInternetDateTime]
             if let date = withFrac.date(from: str) { return date }
             if let date = noFrac.date(from: str) { return date }
             throw DecodingError.dataCorruptedError(
@@ -48,6 +52,10 @@ final class TimerStore: ObservableObject {
                 self?.reload()
             }
         }
+    }
+
+    func reloadFromDisk() {
+        reload()
     }
 
     private func reload() {
@@ -125,6 +133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // user-initiated stop (state vanished while end_time was still in the future).
     private var lastCountdownEndTime: Date?
     private var lastWasVisibleCountdown = false
+    private var alertedEndTime: Date?
 
     func applicationDidFinishLaunching(_ note: Notification) {
         let stateURL = URL(
@@ -157,9 +166,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // is now in the past. Only fire if it's a genuine expiry, not a user stop.
         if lastWasVisibleCountdown && !visible,
            let prevEnd = lastCountdownEndTime,
-           prevEnd <= now
+           prevEnd <= now,
+           alertedEndTime != prevEnd
         {
-            NSSound(named: "Glass")?.play()
+            alertedEndTime = prevEnd
+            handleExpiredTimer()
         }
 
         lastCountdownEndTime = state?.end_time
@@ -245,6 +256,203 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.orderFrontRegardless()
     }
     @objc private func hideBar() { panel.orderOut(nil) }
+
+    private func handleExpiredTimer() {
+        guard let expired = store.state else { return }
+
+        let alertToken = startNoisyAlert(label: expired.label, volume: expired.alert_volume ?? 7)
+        let extensionMinutes = askForExtension(expired)
+        stopNoisyAlert(alertToken)
+
+        if let extensionMinutes {
+            extend(expired, by: extensionMinutes)
+            return
+        }
+
+        appendLog("Completed \(expired.minutes ?? estimatedMinutes(expired)) min timer\(labelSuffix(expired.label))", to: expired.log_file_path)
+        clear(expired)
+    }
+
+    private func startNoisyAlert(label: String?, volume: Double) -> URL {
+        let token = FileManager.default.temporaryDirectory
+            .appendingPathComponent("timer-overlay-alert-\(UUID().uuidString)")
+        FileManager.default.createFile(atPath: token.path, contents: Data())
+
+        let safeVolume = min(max(volume, 0.1), 10)
+        let spoken = label.map { "Timer done. \($0)." } ?? "Timer done."
+        let command = """
+        while [ -f \(shellQuoted(token.path)) ]; do
+          afplay --volume \(safeVolume) /System/Library/Sounds/Sosumi.aiff &
+          afplay --volume \(safeVolume) /System/Library/Sounds/Basso.aiff &
+          say \(shellQuoted(spoken)) &
+          sleep 3
+        done
+        """
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-c", command]
+        try? process.run()
+        return token
+    }
+
+    private func stopNoisyAlert(_ token: URL) {
+        try? FileManager.default.removeItem(at: token)
+    }
+
+    private func askForExtension(_ timer: TimerState) -> Int? {
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.messageText = "Timer done"
+        alert.informativeText = timer.label.map {
+            "\(timer.minutes ?? estimatedMinutes(timer)) min timer: \($0)\n\nExtend it?"
+        } ?? "\(timer.minutes ?? estimatedMinutes(timer)) min timer\n\nExtend it?"
+        alert.addButton(withTitle: "Extend 5 min")
+        alert.addButton(withTitle: "Extend 10 min")
+        alert.addButton(withTitle: "Done")
+        alert.alertStyle = .informational
+
+        let result = alert.runModal()
+        if result == .alertFirstButtonReturn { return 5 }
+        if result == .alertSecondButtonReturn { return 10 }
+        return nil
+    }
+
+    private func extend(_ timer: TimerState, by minutes: Int) {
+        let now = Date()
+        let end = now.addingTimeInterval(TimeInterval(minutes * 60))
+        let next = TimerState(
+            label: timer.label,
+            started_at: now,
+            end_time: end,
+            minutes: minutes,
+            active_state_file: timer.active_state_file,
+            log_file_path: timer.log_file_path,
+            alert_volume: timer.alert_volume
+        )
+
+        writeOverlay(next)
+        writeActiveState(next)
+        appendLog("Extended timer by \(minutes) min\(labelSuffix(timer.label))", to: timer.log_file_path)
+        alertedEndTime = nil
+        store.reloadFromDisk()
+    }
+
+    private func clear(_ timer: TimerState) {
+        if let active = timer.active_state_file {
+            try? FileManager.default.removeItem(atPath: NSString(string: active).expandingTildeInPath)
+        }
+        let overlay = NSString(string: "~/.timer-overlay/state.json").expandingTildeInPath
+        try? FileManager.default.removeItem(atPath: overlay)
+        store.reloadFromDisk()
+    }
+
+    private func writeOverlay(_ timer: TimerState) {
+        let overlayURL = URL(fileURLWithPath: NSString(string: "~/.timer-overlay/state.json").expandingTildeInPath)
+        try? FileManager.default.createDirectory(
+            at: overlayURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let payload: [String: Any] = [
+            "label": jsonValue(timer.label),
+            "started_at": isoString(timer.started_at),
+            "end_time": jsonValue(timer.end_time.map(isoString)),
+            "minutes": jsonValue(timer.minutes),
+            "active_state_file": jsonValue(timer.active_state_file),
+            "log_file_path": jsonValue(timer.log_file_path),
+            "alert_volume": jsonValue(timer.alert_volume)
+        ]
+        writeJSON(payload, to: overlayURL)
+    }
+
+    private func writeActiveState(_ timer: TimerState) {
+        guard let active = timer.active_state_file, let end = timer.end_time else { return }
+        let url = URL(fileURLWithPath: NSString(string: active).expandingTildeInPath)
+        let payload: [String: Any] = [
+            "startTime": isoString(timer.started_at),
+            "minutes": timer.minutes ?? estimatedMinutes(timer),
+            "endTime": isoString(end),
+            "label": jsonValue(timer.label)
+        ]
+        writeJSON(payload, to: url)
+    }
+
+    private func jsonValue<T>(_ value: T?) -> Any {
+        value ?? NSNull()
+    }
+
+    private func writeJSON(_ payload: [String: Any], to url: URL) {
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted])
+        else { return }
+        try? data.write(to: url)
+    }
+
+    private func appendLog(_ event: String, to path: String?) {
+        guard let rawPath = path, !rawPath.isEmpty else { return }
+        let url = URL(fileURLWithPath: NSString(string: rawPath).expandingTildeInPath)
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        let now = Date()
+        let dateHeading = "## \(dateString(now))"
+        let entry = "- \(timeString(now)) — \(event)"
+        let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        let next: String
+
+        if let headingRange = existing.range(of: dateHeading) {
+            let afterHeading = headingRange.upperBound
+            let nextHeading = existing[afterHeading...].range(of: "\n## ")
+            let insertAt = nextHeading?.lowerBound ?? existing.endIndex
+            next = existing[..<insertAt].trimmingCharacters(in: .whitespacesAndNewlines)
+                + "\n" + entry + "\n" + existing[insertAt...]
+        } else {
+            next = existing.trimmingCharacters(in: .whitespacesAndNewlines)
+                + (existing.isEmpty ? "" : "\n\n")
+                + dateHeading + "\n\n" + entry + "\n"
+        }
+
+        try? next.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private func estimatedMinutes(_ timer: TimerState) -> Int {
+        guard let end = timer.end_time else { return 0 }
+        return max(1, Int((end.timeIntervalSince(timer.started_at) / 60).rounded()))
+    }
+
+    private func labelSuffix(_ label: String?) -> String {
+        guard let label, !label.isEmpty else { return "" }
+        return ": \(label)"
+    }
+
+    private func shellQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private func isoString(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
+    }
+
+    private func dateString(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+
+    private func timeString(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "h:mm a"
+        return formatter.string(from: date)
+    }
 }
 
 @main
