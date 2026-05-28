@@ -108,6 +108,13 @@ struct BarView: View {
             }
         }
         .foregroundStyle(accent)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+        .background(.black.opacity(0.86), in: Capsule())
+        .overlay(
+            Capsule()
+                .stroke(accent.opacity(0.4), lineWidth: 1)
+        )
     }
 
     private var formattedTime: String {
@@ -149,6 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusItem()
         setupPanel()
         store.start()
+        updateVisibility(visible: store.displaySeconds != nil)
 
         cancellable = Publishers.CombineLatest(store.$state, store.$now)
             .sink { [weak self] _, _ in
@@ -214,7 +222,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         panel.contentViewController = host
-        panel.level = .floating
+        panel.level = .screenSaver
         panel.collectionBehavior = [
             .canJoinAllSpaces,
             .stationary,

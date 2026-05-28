@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.alirohde.timer-overlay</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/alirohde/code/projects/timer-overlay/.build/release/TimerOverlay</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/timer-overlay.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/timer-overlay.err.log</string>
+</dict>
+</plist>
