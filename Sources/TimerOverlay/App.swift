@@ -80,10 +80,17 @@ final class TimerStore: ObservableObject {
     }
 }
 
+@MainActor
+final class OverlayControls: ObservableObject {
+    @Published var isMoveMode = false
+}
+
 struct BarView: View {
     @ObservedObject var store: TimerStore
+    @ObservedObject var controls: OverlayControls
     let width: CGFloat
     let height: CGFloat
+    let onDrag: (CGSize, Bool) -> Void
     private let accent = Color(red: 1.0, green: 0.16, blue: 0.52)
 
     var body: some View {
@@ -93,6 +100,8 @@ struct BarView: View {
             Spacer(minLength: 0)
         }
         .frame(width: width, height: height)
+        .contentShape(Rectangle())
+        .gesture(dragGesture)
     }
 
     private var pill: some View {
@@ -113,6 +122,18 @@ struct BarView: View {
         .background(.black.opacity(0.86), in: Capsule())
     }
 
+    private var dragGesture: some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                guard controls.isMoveMode else { return }
+                onDrag(value.translation, false)
+            }
+            .onEnded { value in
+                guard controls.isMoveMode else { return }
+                onDrag(value.translation, true)
+            }
+    }
+
     private var formattedTime: String {
         let s = store.displaySeconds ?? 0
         let h = s / 3600
@@ -129,7 +150,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var panel: NSPanel!
     private var store: TimerStore!
+    private let controls = OverlayControls()
     private var cancellable: AnyCancellable?
+    private var dragStartOrigin: NSPoint?
 
     // Tracks the previous tick so we can detect natural countdown expiration
     // (countdown active → not visible AND the prior end_time has passed) vs a
@@ -137,6 +160,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastCountdownEndTime: Date?
     private var lastWasVisibleCountdown = false
     private var alertedEndTime: Date?
+    private var preferencesURL: URL {
+        URL(fileURLWithPath: NSString(string: "~/.timer-overlay/preferences.json").expandingTildeInPath)
+    }
 
     func applicationDidFinishLaunching(_ note: Notification) {
         let stateURL = URL(
@@ -192,6 +218,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Show bar", action: #selector(showBar), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Hide bar", action: #selector(hideBar), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Move bar", action: #selector(unlockMoving), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Lock bar", action: #selector(lockMoving), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Reset position", action: #selector(resetPosition), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(
             title: "Quit",
@@ -208,7 +237,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupPanel() {
         let host = NSHostingController(
-            rootView: BarView(store: store, width: Self.panelWidth, height: Self.panelHeight)
+            rootView: BarView(
+                store: store,
+                controls: controls,
+                width: Self.panelWidth,
+                height: Self.panelHeight,
+                onDrag: { [weak self] translation, ended in
+                    self?.dragPanel(translation: translation, ended: ended)
+                }
+            )
         )
 
         panel = NSPanel(
@@ -225,7 +262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .fullScreenAuxiliary,
             .ignoresCycle
         ]
-        // Pure display overlay — let clicks pass through everywhere, including the pill.
+        // Normal mode is pure display. The status menu temporarily unlocks mouse events for dragging.
         panel.ignoresMouseEvents = true
         panel.isOpaque = false
         panel.backgroundColor = .clear
@@ -233,7 +270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
 
-        positionAtBottomCenter()
+        positionAtSavedOrDefault()
     }
 
     // Bottom-center placement, matching Raycast Focus bar position.
@@ -246,9 +283,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.setFrameOrigin(NSPoint(x: x, y: y))
     }
 
+    private func positionAtSavedOrDefault() {
+        if let saved = savedPosition() {
+            panel.setFrameOrigin(clampedPosition(saved))
+        } else {
+            positionAtBottomCenter()
+        }
+    }
+
+    private func savedPosition() -> NSPoint? {
+        guard let data = try? Data(contentsOf: preferencesURL),
+              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let x = payload["x"] as? Double,
+              let y = payload["y"] as? Double
+        else { return nil }
+        return NSPoint(x: x, y: y)
+    }
+
+    private func savePosition(_ point: NSPoint) {
+        try? FileManager.default.createDirectory(
+            at: preferencesURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let payload: [String: Any] = ["x": point.x, "y": point.y]
+        writeJSON(payload, to: preferencesURL)
+    }
+
+    private func clampedPosition(_ point: NSPoint) -> NSPoint {
+        guard let screen = NSScreen.screens.first(where: { $0.visibleFrame.intersects(panel.frame) })
+                ?? NSScreen.main
+        else { return point }
+
+        let frame = screen.visibleFrame
+        let x = min(max(point.x, frame.minX), frame.maxX - Self.panelWidth)
+        let y = min(max(point.y, frame.minY), frame.maxY - Self.panelHeight)
+        return NSPoint(x: x, y: y)
+    }
+
+    private func dragPanel(translation: CGSize, ended: Bool) {
+        if dragStartOrigin == nil {
+            dragStartOrigin = panel.frame.origin
+        }
+        guard let start = dragStartOrigin else { return }
+
+        let next = clampedPosition(NSPoint(
+            x: start.x + translation.width,
+            y: start.y - translation.height
+        ))
+        panel.setFrameOrigin(next)
+
+        if ended {
+            savePosition(next)
+            dragStartOrigin = nil
+            controls.isMoveMode = false
+            panel.ignoresMouseEvents = true
+        }
+    }
+
     private func updateVisibility(visible: Bool) {
         if visible {
-            positionAtBottomCenter()
+            positionAtSavedOrDefault()
             panel.orderFrontRegardless()
         } else {
             panel.orderOut(nil)
@@ -256,10 +350,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showBar() {
-        positionAtBottomCenter()
+        positionAtSavedOrDefault()
         panel.orderFrontRegardless()
     }
     @objc private func hideBar() { panel.orderOut(nil) }
+    @objc private func unlockMoving() {
+        controls.isMoveMode = true
+        dragStartOrigin = nil
+        panel.ignoresMouseEvents = false
+        positionAtSavedOrDefault()
+        panel.orderFrontRegardless()
+    }
+    @objc private func lockMoving() {
+        controls.isMoveMode = false
+        dragStartOrigin = nil
+        panel.ignoresMouseEvents = true
+    }
+    @objc private func resetPosition() {
+        try? FileManager.default.removeItem(at: preferencesURL)
+        positionAtBottomCenter()
+        savePosition(panel.frame.origin)
+    }
 
     private func handleExpiredTimer() {
         guard let expired = store.state else { return }
