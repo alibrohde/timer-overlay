@@ -6,6 +6,7 @@ import Combine
 // Countdown: end_time set. Stopwatch: end_time nil → counts up from started_at.
 struct TimerState: Codable, Equatable {
     let label: String?
+    let why: String?
     let started_at: Date
     let end_time: Date?
     let minutes: Int?
@@ -374,32 +375,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleExpiredTimer() {
         guard let expired = store.state else { return }
 
-        let alertToken = startNoisyAlert(label: expired.label, volume: expired.alert_volume ?? 7)
+        let alertToken = startAlert(label: expired.label, volume: expired.alert_volume ?? 3)
         let extensionMinutes = askForExtension(expired)
-        stopNoisyAlert(alertToken)
+        stopAlert(alertToken)
 
         if let extensionMinutes {
             extend(expired, by: extensionMinutes)
             return
         }
 
-        appendLog("Completed \(expired.minutes ?? estimatedMinutes(expired)) min timer\(labelSuffix(expired.label))", to: expired.log_file_path)
+        appendLog(
+            "Completed \(expired.minutes ?? estimatedMinutes(expired)) min timer\(labelSuffix(expired.label))\(whySuffix(expired.why))",
+            to: expired.log_file_path
+        )
         clear(expired)
     }
 
-    private func startNoisyAlert(label: String?, volume: Double) -> URL {
+    private func startAlert(label: String?, volume: Double) -> URL {
         let token = FileManager.default.temporaryDirectory
             .appendingPathComponent("timer-overlay-alert-\(UUID().uuidString)")
         FileManager.default.createFile(atPath: token.path, contents: Data())
 
-        let safeVolume = min(max(volume, 0.1), 10)
+        let safeVolume = min(max(volume, 0.1), 5)
         let spoken = label.map { "Timer done. \($0)." } ?? "Timer done."
         let command = """
-        while [ -f \(shellQuoted(token.path)) ]; do
-          afplay --volume \(safeVolume) /System/Library/Sounds/Sosumi.aiff &
-          afplay --volume \(safeVolume) /System/Library/Sounds/Basso.aiff &
-          say \(shellQuoted(spoken)) &
-          sleep 3
+        for _ in {1..10}; do
+          [ -f \(shellQuoted(token.path)) ] || exit 0
+          afplay --volume \(safeVolume) /System/Library/Sounds/Glass.aiff &
+          say -v Samantha -r 175 \(shellQuoted(spoken)) &
+          sleep 5
         done
         """
 
@@ -410,7 +414,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return token
     }
 
-    private func stopNoisyAlert(_ token: URL) {
+    private func stopAlert(_ token: URL) {
         try? FileManager.default.removeItem(at: token)
     }
 
@@ -422,10 +426,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.informativeText = timer.label.map {
             "\(timer.minutes ?? estimatedMinutes(timer)) min timer: \($0)\n\nExtend it?"
         } ?? "\(timer.minutes ?? estimatedMinutes(timer)) min timer\n\nExtend it?"
-        alert.addButton(withTitle: "Extend 5 min")
-        alert.addButton(withTitle: "Extend 10 min")
-        alert.addButton(withTitle: "Done")
+        let extend5 = alert.addButton(withTitle: "Extend 5 min")
+        let extend10 = alert.addButton(withTitle: "Extend 10 min")
+        let done = alert.addButton(withTitle: "Done")
         alert.alertStyle = .informational
+        alert.buttons.forEach { $0.keyEquivalent = "" }
+        extend5.keyEquivalent = "5"
+        extend10.keyEquivalent = "0"
+        done.keyEquivalent = "d"
 
         let result = alert.runModal()
         if result == .alertFirstButtonReturn { return 5 }
@@ -438,6 +446,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let end = now.addingTimeInterval(TimeInterval(minutes * 60))
         let next = TimerState(
             label: timer.label,
+            why: timer.why,
             started_at: now,
             end_time: end,
             minutes: minutes,
@@ -448,7 +457,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         writeOverlay(next)
         writeActiveState(next)
-        appendLog("Extended timer by \(minutes) min\(labelSuffix(timer.label))", to: timer.log_file_path)
+        appendLog("Extended timer by \(minutes) min\(labelSuffix(timer.label))\(whySuffix(timer.why))", to: timer.log_file_path)
         alertedEndTime = nil
         store.reloadFromDisk()
     }
@@ -470,6 +479,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         let payload: [String: Any] = [
             "label": jsonValue(timer.label),
+            "why": jsonValue(timer.why),
             "started_at": isoString(timer.started_at),
             "end_time": jsonValue(timer.end_time.map(isoString)),
             "minutes": jsonValue(timer.minutes),
@@ -487,7 +497,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "startTime": isoString(timer.started_at),
             "minutes": timer.minutes ?? estimatedMinutes(timer),
             "endTime": isoString(end),
-            "label": jsonValue(timer.label)
+            "label": jsonValue(timer.label),
+            "why": jsonValue(timer.why)
         ]
         writeJSON(payload, to: url)
     }
@@ -544,6 +555,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func labelSuffix(_ label: String?) -> String {
         guard let label, !label.isEmpty else { return "" }
         return ": \(label)"
+    }
+
+    private func whySuffix(_ why: String?) -> String {
+        guard let why, !why.isEmpty else { return "" }
+        return " — why: \(why)"
     }
 
     private func shellQuoted(_ value: String) -> String {
