@@ -375,7 +375,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleExpiredTimer() {
         guard let expired = store.state else { return }
 
-        let alertToken = startAlert(label: expired.label, volume: expired.alert_volume ?? 3)
+        let alertToken = startAlert(volume: expired.alert_volume ?? 0.25)
         let extensionMinutes = askForExtension(expired)
         stopAlert(alertToken)
 
@@ -391,18 +391,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         clear(expired)
     }
 
-    private func startAlert(label: String?, volume: Double) -> URL {
+    private func startAlert(volume: Double) -> URL {
         let token = FileManager.default.temporaryDirectory
             .appendingPathComponent("timer-overlay-alert-\(UUID().uuidString)")
         FileManager.default.createFile(atPath: token.path, contents: Data())
 
-        let safeVolume = min(max(volume, 0.1), 5)
-        let spoken = label.map { "Timer done. \($0)." } ?? "Timer done."
+        let safeVolume = min(max(volume, 0.05), 1)
         let command = """
         for _ in {1..10}; do
           [ -f \(shellQuoted(token.path)) ] || exit 0
           afplay --volume \(safeVolume) /System/Library/Sounds/Glass.aiff &
-          say -v Samantha -r 175 \(shellQuoted(spoken)) &
           sleep 5
         done
         """
